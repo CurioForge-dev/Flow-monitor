@@ -1,0 +1,89 @@
+name: satellite-scan
+on:
+  schedule:
+    - cron: "0 4 */2 * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Scan satellites
+        run: |
+          pip install requests
+          python - <<'PY'
+          import json, os, datetime as dt, requests
+          SITES = [
+            {"name": "Fujairah oil storage (UAE)", "bbox": [56.30, 25.05, 56.40, 25.20]},
+            {"name": "Ras Tanura (Saudi)", "bbox": [50.10, 26.55, 50.25, 26.75]},
+            {"name": "Yanbu (Saudi, Red Sea)", "bbox": [37.95, 23.95, 38.20, 24.20]},
+            {"name": "Kharg Island (Iran)", "bbox": [50.25, 29.15, 50.40, 29.30]},
+            {"name": "Strait of Hormuz", "bbox": [55.80, 25.80, 57.20, 26.80]},
+          ]
+          URL = "https://earth-search.aws.element84.com/v1/search"
+          fmt = "%Y-%m-%dT%H:%M:%SZ"
+          now = dt.datetime.now(dt.timezone.utc)
+          start = (now - dt.timedelta(days=21)).strftime(fmt)
+          end = now.strftime(fmt)
+          def info(f):
+              p = f["properties"]
+              return {
+                  "scene_id": f["id"],
+                  "date": p.get("datetime"),
+                  "cloud_percent": p.get("eo:cloud_cover"),
+                  "preview_image": f.get("assets", {}).get("thumbnail", {}).get("href"),
+              }
+          out = {
+              "generated_at": now.isoformat(timespec="seconds"),
+              "source": "Sentinel-2 L2A via Element84 Earth Search (free, public)",
+              "note": "Cloud percent is for the whole satellite tile. Scene finder only; no tank fill estimate.",
+              "sites": [],
+          }
+          for s in SITES:
+              rec = {"name": s["name"]}
+              try:
+                  r = requests.post(URL, json={
+                      "collections": ["sentinel-2-l2a"],
+                      "bbox": s["bbox"],
+                      "datetime": start + "/" + end,
+                      "limit": 20,
+                      "sortby": [{"field": "properties.datetime", "direction": "desc"}],
+                  }, timeout=60)
+                  r.raise_for_status()
+                  feats = r.json().get("features", [])
+                  if not feats:
+                      rec["status"] = "no scenes in last 21 days"
+                  else:
+                      latest = info(feats[0])
+                      rec["latest"] = latest
+                      clear = [f for f in feats if (f["properties"].get("eo:cloud_cover") or 100) <= 30]
+                      rec["latest_clear"] = info(clear[0]) if clear else None
+                      rec["status"] = "usable" if (latest["cloud_percent"] or 100) <= 30 else "cloudy"
+                      d = dt.datetime.fromisoformat(latest["date"].replace("Z", "+00:00"))
+                      rec["next_pass_expected"] = (d + dt.timedelta(days=5)).date().isoformat()
+              except Exception as e:
+                  rec["status"] = "error: " + str(e)[:120]
+              try:
+                  b = s["bbox"]
+                  q = '[out:json][timeout:60];way["man_made"="storage_tank"](%s,%s,%s,%s);out count;' % (b[1], b[0], b[3], b[2])
+                  o = requests.post("https://overpass-api.de/api/interpreter", data={"data": q}, timeout=90)
+                  rec["mapped_storage_tanks"] = int(o.json()["elements"][0]["tags"]["ways"])
+              except Exception as e:
+                  rec["mapped_storage_tanks"] = "check failed"
+              out["sites"].append(rec)
+          os.makedirs("data", exist_ok=True)
+          with open("data/latest.json", "w") as fh:
+              json.dump(out, fh, indent=2)
+          PY
+      - name: Save results
+        run: |
+          git config user.name "flowwatch-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add data/latest.json
+          git diff --cached --quiet || git commit -m "update satellite scan"
+          git push
