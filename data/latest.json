@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-11-26T12:53:02+00:00",
+  "generated_at": "2026-11-27T04:58:37+00:00",
   "source": "Sentinel-2 L2A via Element84 Earth Search (free, public)",
   "note": "Cloud percent is for the whole satellite tile. Scene finder only; no tank fill estimate.",
   "sites": [
